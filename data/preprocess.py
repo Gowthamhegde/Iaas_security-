@@ -1,18 +1,21 @@
 """
 Stage 2 — Data Acquisition & Preprocessing
 Downloads NSL-KDD, cleans, encodes, and scales for model training.
+Persists encoders/scaler so live inference uses the exact train-time transform.
 """
 
-import os
-import io
 import logging
 import requests
+import joblib
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 logger = logging.getLogger(__name__)
+
+ARTIFACTS_DIR = Path(__file__).parent.parent / "model" / "artifacts"
+PREPROCESSOR_PATH = ARTIFACTS_DIR / "preprocessor.joblib"
 
 # ── NSL-KDD column definitions ────────────────────────────────────────────────
 FEATURE_NAMES = [
@@ -54,6 +57,7 @@ CATEGORICAL_COLS = ["protocol_type", "service", "flag"]
 
 # Public mirrors for NSL-KDD
 NSLKDD_URLS = {
+    
     "train": "https://raw.githubusercontent.com/defcom17/NSL_KDD/master/KDDTrain+.txt",
     "test":  "https://raw.githubusercontent.com/defcom17/NSL_KDD/master/KDDTest+.txt",
 }
@@ -165,14 +169,53 @@ def load_and_preprocess(data_dir=DATA_DIR):
     logger.info(f"[Preprocessing] Class distribution (train): "
                 f"{pd.Series(y_train).value_counts().to_dict()}")
 
-    return {
-        "X_train":      X_train_scaled,
-        "y_train":      y_train,
-        "X_test":       X_test_scaled,
-        "y_test":       y_test,
-        "encoders":     encoders,
-        "scaler":       scaler,
+    result = {
+        "X_train":       X_train_scaled,
+        "y_train":       y_train,
+        "X_test":        X_test_scaled,
+        "y_test":        y_test,
+        "encoders":      encoders,
+        "scaler":        scaler,
         "feature_names": feature_names,
+    }
+    save_preprocessor(encoders, scaler, feature_names)
+    return result
+
+
+def save_preprocessor(encoders, scaler, feature_names, path=PREPROCESSOR_PATH):
+    """Persist train-time encoders/scaler for live-server inference."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(
+        {
+            "encoders":      encoders,
+            "scaler":        scaler,
+            "feature_names": list(feature_names),
+        },
+        path,
+    )
+    logger.info(f"[Preprocessing] Saved preprocessor -> {path}")
+
+
+def load_preprocessor(path=PREPROCESSOR_PATH):
+    """
+    Load persisted preprocessor for live inference.
+    If missing, rebuild from NSL-KDD train split (deterministic LabelEncoder/Scaler).
+    """
+    path = Path(path)
+    if path.exists():
+        bundle = joblib.load(path)
+        logger.info(f"[Preprocessing] Loaded preprocessor from {path}")
+        return bundle
+
+    logger.warning(
+        "[Preprocessing] No preprocessor.joblib found — rebuilding from NSL-KDD train data."
+    )
+    data = load_and_preprocess()
+    return {
+        "encoders":      data["encoders"],
+        "scaler":        data["scaler"],
+        "feature_names": data["feature_names"],
     }
 
 

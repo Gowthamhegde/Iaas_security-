@@ -4,5 +4,6 @@ __pycache__/
 *.pyo
 data/raw/
 model/artifacts/
+logs/
 *.log
 .env

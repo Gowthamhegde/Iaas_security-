@@ -24,7 +24,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import streamlit as st
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,16 +167,23 @@ if "metrics"        not in st.session_state: st.session_state.metrics        = {
 if "model_loaded"   not in st.session_state: st.session_state.model_loaded   = False
 if "tau"            not in st.session_state: st.session_state.tau            = 0.60
 if "flow_rate"      not in st.session_state: st.session_state.flow_rate      = 3.0
+if "capture_mode"   not in st.session_state: st.session_state.capture_mode   = "Simulate"
+if "interface"      not in st.session_state: st.session_state.interface      = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: load model artifacts
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading ML model…")
-def get_inference_service(tau, rate):
+def get_inference_service(tau, rate, simulate, interface, flow_timeout):
     from inference.service import InferenceService
-    svc = InferenceService(simulate=True, tau=tau, rate=rate)
-    return svc
+    return InferenceService(
+        simulate=simulate,
+        interface=interface or None,
+        tau=tau,
+        rate=rate,
+        flow_timeout=flow_timeout,
+    )
 
 
 def load_metrics_cache():
@@ -218,10 +225,35 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("**Pipeline Settings**")
+    capture_mode = st.radio(
+        "Capture mode",
+        ["Simulate", "Live server"],
+        horizontal=True,
+        help="Live server mode sniffs a NIC and scores real flows with the trained model.",
+    )
+    interface = ""
+    flow_timeout = 30.0
+    if capture_mode == "Live server":
+        try:
+            from inference.flow_extractor import LiveFlowExtractor
+            ifaces = LiveFlowExtractor.list_interfaces()
+        except Exception:
+            ifaces = []
+        interface = st.selectbox(
+            "Network interface",
+            options=[""] + ifaces if ifaces else [""],
+            format_func=lambda x: x or "(default / auto)",
+            help="Requires Npcap+Admin on Windows, or root/CAP_NET_RAW on Linux.",
+        )
+        flow_timeout = st.slider("Flow idle timeout (sec)", 5.0, 120.0, 30.0, 5.0)
+        st.caption("Alerts are also written to `logs/alerts.jsonl`.")
+
     tau = st.slider("Alert threshold (τ)", 0.40, 0.99, 0.60, 0.01,
                     help="Minimum confidence for raising an alert (Algorithm 1 line 7)")
-    flow_rate = st.slider("Flow rate (flows/sec)", 0.5, 10.0, 3.0, 0.5,
-                          help="Synthetic traffic generation speed")
+    flow_rate = 3.0
+    if capture_mode == "Simulate":
+        flow_rate = st.slider("Flow rate (flows/sec)", 0.5, 10.0, 3.0, 0.5,
+                              help="Synthetic traffic generation speed")
 
     st.markdown("---")
     col_start, col_stop = st.columns(2)
@@ -235,12 +267,18 @@ with st.sidebar:
     artifacts_path = ROOT / "model" / "artifacts"
     model_exists   = (artifacts_path / "random_forest.pkl").exists()
     metrics_exist  = (artifacts_path / "metrics.json").exists()
+    prep_exists    = (artifacts_path / "preprocessor.joblib").exists()
 
     if model_exists:
         st.success("✓ Model loaded")
     else:
         st.warning("⚠ Model not trained yet")
         st.caption("Run: `python model/train.py`")
+
+    if prep_exists:
+        st.success("✓ Preprocessor ready")
+    elif model_exists:
+        st.info("Preprocessor will rebuild on first start")
 
     if metrics_exist:
         m = load_metrics_cache()
@@ -252,7 +290,7 @@ with st.sidebar:
     st.markdown(
         "<div style='font-size:0.65rem;color:#475569;text-align:center'>"
         "Algorithm 1 · NSL-KDD · Random Forest<br>"
-        "Suricata baseline comparison enabled"
+        "Live server capture · Suricata baseline comparison"
         "</div>",
         unsafe_allow_html=True
     )
@@ -266,14 +304,21 @@ if start_btn and not st.session_state.service_running:
         st.sidebar.error("Train the model first: `python model/train.py`")
     else:
         try:
-            svc = get_inference_service(tau, flow_rate)
-            svc.tau   = tau
-            svc.rate  = flow_rate
+            get_inference_service.clear()
+            simulate = capture_mode == "Simulate"
+            svc = get_inference_service(
+                tau, flow_rate, simulate, interface, flow_timeout
+            )
+            svc.tau = tau
+            svc.rate = flow_rate
             svc.start()
-            st.session_state.service         = svc
+            st.session_state.service = svc
             st.session_state.service_running = True
-            st.session_state.tau             = tau
-            st.sidebar.success("Pipeline running ✓")
+            st.session_state.tau = tau
+            st.session_state.capture_mode = capture_mode
+            st.session_state.interface = interface
+            mode_label = "simulation" if simulate else f"live ({interface or 'default'})"
+            st.sidebar.success(f"Pipeline running ({mode_label}) ✓")
         except Exception as e:
             st.sidebar.error(f"Failed to start: {e}")
 

@@ -8,10 +8,11 @@ Implements the full Algorithm 1 lifecycle:
   Stage 5: Dashboard launch
 
 Usage:
-  python pipeline.py --train          # Stages 1-3 only (train model)
-  python pipeline.py --infer          # Stages 4 only (run inference, no dashboard)
-  python pipeline.py --dashboard      # Stage 5 (launch dashboard)
-  python pipeline.py                  # Full pipeline: train -> infer + dashboard
+  python pipeline.py --train                    # Stages 1-3 only (train model)
+  python pipeline.py --infer                    # Stage 4 simulation
+  python pipeline.py --infer --live -i eth0     # Stage 4 live server capture
+  python pipeline.py --dashboard                # Stage 5 (launch dashboard)
+  python pipeline.py                            # Full pipeline: train -> dashboard
 """
 
 import argparse
@@ -97,15 +98,23 @@ def stage3_train(data=None, quick=False):
     return model, metrics
 
 
-def stage4_infer(tau=0.60, rate=3.0, duration=None):
-    """Stage 4: Start the inference service (blocks until duration expires or Ctrl-C)."""
+def stage4_infer(tau=0.60, rate=3.0, duration=None, live=False, interface=None,
+                 flow_timeout=30.0):
+    """Stage 4: Start inference (simulation or live NIC capture on a server)."""
     logger.info("=" * 60)
-    logger.info("STAGE 4 — Inference Service")
+    logger.info("STAGE 4 — Inference Service (%s)",
+                "LIVE" if live else "SIMULATION")
     logger.info("=" * 60)
     from inference.service import InferenceService, get_event_queue
     import queue as q
 
-    svc = InferenceService(simulate=True, tau=tau, rate=rate)
+    svc = InferenceService(
+        simulate=not live,
+        interface=interface,
+        tau=tau,
+        rate=rate,
+        flow_timeout=flow_timeout,
+    )
     svc.start()
 
     event_queue = get_event_queue()
@@ -120,7 +129,8 @@ def stage4_infer(tau=0.60, rate=3.0, duration=None):
                 print(
                     f"{tag} {evt['timestamp'][:19]} | "
                     f"{evt['predicted']:8s} ({evt['probability']:.2f}) | "
-                    f"{evt['src_ip']} -> {evt['dst_ip']}"
+                    f"{evt['src_ip']}:{evt.get('src_port',0)} -> "
+                    f"{evt['dst_ip']}:{evt.get('dst_port',0)}"
                 )
             except q.Empty:
                 pass
@@ -152,10 +162,22 @@ def main():
     parser.add_argument("--infer",     action="store_true", help="Run Stage 4 (inference only)")
     parser.add_argument("--dashboard", action="store_true", help="Run Stage 5 (dashboard only)")
     parser.add_argument("--quick",     action="store_true", help="Fast training (single RF config, no grid search)")
+    parser.add_argument("--live",      action="store_true", help="Live NIC capture (server mode)")
+    parser.add_argument("-i", "--interface", default=None, help="Network interface for --live")
+    parser.add_argument("--flow-timeout", type=float, default=30.0, help="Idle flow export timeout (sec)")
+    parser.add_argument("--list-ifaces", action="store_true", help="List capture interfaces and exit")
     parser.add_argument("--tau",       type=float, default=0.60, help="Alert confidence threshold")
     parser.add_argument("--rate",      type=float, default=3.0,  help="Simulated flow rate (flows/sec)")
     parser.add_argument("--duration",  type=int,   default=None, help="Inference duration in seconds")
     args = parser.parse_args()
+
+    if args.list_ifaces:
+        from inference.flow_extractor import LiveFlowExtractor
+        ifaces = LiveFlowExtractor.list_interfaces()
+        print("Available interfaces:" if ifaces else "No interfaces found.")
+        for name in ifaces:
+            print(f"  - {name}")
+        return
 
     # Default: full pipeline
     run_all = not (args.train or args.infer or args.dashboard)
@@ -167,7 +189,14 @@ def main():
         stage3_train(data=data, quick=args.quick)
 
     if args.infer:
-        stage4_infer(tau=args.tau, rate=args.rate, duration=args.duration)
+        stage4_infer(
+            tau=args.tau,
+            rate=args.rate,
+            duration=args.duration,
+            live=args.live,
+            interface=args.interface,
+            flow_timeout=args.flow_timeout,
+        )
         return
 
     if args.dashboard or run_all:
