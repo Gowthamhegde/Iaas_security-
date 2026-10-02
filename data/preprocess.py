@@ -51,6 +51,16 @@ ATTACK_MAP = {
     "buffer_overflow": "U2R", "loadmodule": "U2R", "perl": "U2R",
     "rootkit": "U2R", "httptunnel": "U2R", "ps": "U2R",
     "sqlattack": "U2R", "xterm": "U2R",
+    # CICIDS2017 mappings
+    "benign": "Normal",
+    "dos hulk": "DoS", "dos goldeneye": "DoS", "dos slowloris": "DoS", "dos slowhttptest": "DoS",
+    "ddos": "DoS",
+    "portscan": "Probe",
+    "ftp-patator": "R2L", "ssh-patator": "R2L",
+    "bot": "R2L",
+    "web attack - brute force": "U2R", "web attack - xss": "U2R", "web attack - sql injection": "U2R",
+    "infiltration": "U2R",
+    "heartbleed": "Probe"
 }
 
 CATEGORICAL_COLS = ["protocol_type", "service", "flag"]
@@ -91,11 +101,35 @@ def _load_raw(path):
 
 
 def _map_labels(df):
-    """Map raw KDD attack strings to 5-class labels."""
+    """Map raw KDD/CICIDS attack strings to 5-class labels."""
     df = df.copy()
-    df["label"] = df["label"].str.strip().str.lower().str.rstrip(".")
+    if "Label" in df.columns:
+        df.rename(columns={"Label": "label"}, inplace=True)
+    df["label"] = df["label"].astype(str).str.strip().str.lower().str.rstrip(".")
     df["label"] = df["label"].map(ATTACK_MAP).fillna("U2R")
     return df
+
+def _load_cicids2017(data_dir=DATA_DIR):
+    """Load CICIDS2017 data if available, or return a small dummy DataFrame."""
+    cic_path = data_dir / "cicids2017.csv"
+    if cic_path.exists():
+        logger.info(f"[CICIDS2017] Loading dataset from {cic_path} ...")
+        df = pd.read_csv(cic_path)
+        # Standardize column names (strip spaces, lowercase)
+        df.columns = df.columns.str.strip().str.lower()
+        if "label" not in df.columns and "Label" in df.columns:
+            df.rename(columns={"Label": "label"}, inplace=True)
+        return df
+    
+    logger.warning("[CICIDS2017] cicids2017.csv not found in data/raw/. Using a dummy sample for the merge.")
+    # Create a dummy dataframe with some CICIDS2017 specific columns to demonstrate the merge
+    dummy_data = {
+        "flow duration": [100, 200, 300, 400],
+        "total fwd packets": [2, 3, 4, 5],
+        "total backward packets": [1, 2, 3, 4],
+        "label": ["BENIGN", "DoS Hulk", "PortScan", "Bot"]
+    }
+    return pd.DataFrame(dummy_data)
 
 
 def _encode_categoricals(df, encoders=None, fit=True):
@@ -136,27 +170,58 @@ def load_and_preprocess(data_dir=DATA_DIR):
     Full preprocessing pipeline:
       1. Download NSL-KDD if needed
       2. Load raw files
-      3. Map labels -> 5-class
-      4. Encode categoricals
-      5. Scale features
+      3. Load CICIDS2017
+      4. Map labels -> 5-class
+      5. Merge datasets (filling missing features with 0)
+      6. Encode categoricals
+      7. Scale features
     Returns a dict with X_train, y_train, X_test, y_test, encoders, scaler, feature_names.
     """
     paths = download_nslkdd(data_dir)
 
     train_df = _load_raw(paths["train"])
     test_df  = _load_raw(paths["test"])
+    
+    # Load CICIDS2017
+    cicids_df = _load_cicids2017(data_dir)
 
     train_df = _map_labels(train_df)
     test_df  = _map_labels(test_df)
+    cicids_df = _map_labels(cicids_df)
+    
+    # Split CICIDS2017 into train/test to merge with NSL-KDD
+    # Simple split 80/20 for the sake of the merge
+    np.random.seed(42)
+    mask = np.random.rand(len(cicids_df)) < 0.8
+    cicids_train = cicids_df[mask]
+    cicids_test = cicids_df[~mask]
+    
+    # Merge NSL-KDD and CICIDS2017
+    # Concat will align common columns and place NaN in missing ones
+    merged_train_df = pd.concat([train_df, cicids_train], ignore_index=True, sort=False)
+    merged_test_df = pd.concat([test_df, cicids_test], ignore_index=True, sort=False)
+    
+    # Fill missing features: 0 for numeric, '0' for string
+    for df in [merged_train_df, merged_test_df]:
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                df[col] = df[col].fillna(0)
+            else:
+                df[col] = df[col].fillna("0")
 
-    y_train = train_df["label"].values
-    y_test  = test_df["label"].values
+    y_train = merged_train_df["label"].values
+    y_test  = merged_test_df["label"].values
 
-    X_train = train_df.drop(columns=["label"])
-    X_test  = test_df.drop(columns=["label"])
+    X_train = merged_train_df.drop(columns=["label"])
+    X_test  = merged_test_df.drop(columns=["label"])
 
     X_train, encoders = _encode_categoricals(X_train, fit=True)
     X_test,  _        = _encode_categoricals(X_test, encoders=encoders, fit=False)
+
+    # Some features might be non-numeric due to dirty data (e.g., 'Infinity' or 'NaN' in CICIDS2017)
+    # We force convert to numeric and fill with 0
+    X_train = X_train.apply(pd.to_numeric, errors='coerce').fillna(0)
+    X_test = X_test.apply(pd.to_numeric, errors='coerce').fillna(0)
 
     feature_names = list(X_train.columns)
 

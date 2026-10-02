@@ -74,7 +74,12 @@ def train(
         verbose=2,
         refit=True,
     )
-    gs.fit(X_train, y_train)
+    
+    # Strictly enforce numpy arrays to prevent PyArrow backend crash in pandas 2.0+
+    X_train_np = np.asarray(X_train, dtype=np.float32)
+    y_train_np = np.asarray(y_train)
+    
+    gs.fit(X_train_np, y_train_np)
 
     best_model = gs.best_estimator_
     logger.info(f"[Train] Best params: {gs.best_params_}")

@@ -219,17 +219,20 @@ with st.sidebar:
     <div style='text-align:center;padding:20px 0 10px'>
       <div style='font-size:3rem'>🛡️</div>
       <div style='font-size:1.1rem;font-weight:700;color:#f1f5f9'>IaaS Security</div>
-      <div style='font-size:0.7rem;color:#64748b;letter-spacing:0.1em'>ML-BASED IDS MONITOR</div>
+      <div style='font-size:0.75rem;color:#94a3b8;margin-top:4px'>Network attack watcher</div>
     </div>
     <hr style='border-color:rgba(99,102,241,0.2);margin:10px 0'>
     """, unsafe_allow_html=True)
 
-    st.markdown("**Pipeline Settings**")
+    st.info("① Pick mode → ② Adjust threshold → ③ Press **Start**", icon="👉")
+
+    st.markdown("**1. Where does traffic come from?**")
     capture_mode = st.radio(
         "Capture mode",
         ["Simulate", "Live server"],
         horizontal=True,
-        help="Live server mode sniffs a NIC and scores real flows with the trained model.",
+        help="Simulate = fake traffic to learn the UI. Live server = real NIC packets.",
+        label_visibility="collapsed",
     )
     interface = ""
     flow_timeout = 30.0
@@ -240,22 +243,28 @@ with st.sidebar:
         except Exception:
             ifaces = []
         interface = st.selectbox(
-            "Network interface",
+            "Which network card?",
             options=[""] + ifaces if ifaces else [""],
-            format_func=lambda x: x or "(default / auto)",
-            help="Requires Npcap+Admin on Windows, or root/CAP_NET_RAW on Linux.",
+            format_func=lambda x: x or "(auto / default)",
+            help="Windows needs Npcap + Run as Administrator.",
         )
-        flow_timeout = st.slider("Flow idle timeout (sec)", 5.0, 120.0, 30.0, 5.0)
-        st.caption("Alerts are also written to `logs/alerts.jsonl`.")
+        flow_timeout = st.slider("Wait this long before scoring a quiet connection (sec)", 5.0, 120.0, 30.0, 5.0)
+        st.caption("Alerts also saved to logs/alerts.jsonl")
 
-    tau = st.slider("Alert threshold (τ)", 0.40, 0.99, 0.60, 0.01,
-                    help="Minimum confidence for raising an alert (Algorithm 1 line 7)")
+    st.markdown("**2. How strict should alerts be?**")
+    tau = st.slider(
+        "Alert threshold (τ)", 0.40, 0.99, 0.60, 0.01,
+        help="Higher = fewer alerts (only when very sure). Lower = more alerts.",
+    )
+    st.caption(f"Alert only if confidence ≥ **{tau:.0%}** and class is not Normal.")
+
     flow_rate = 3.0
     if capture_mode == "Simulate":
-        flow_rate = st.slider("Flow rate (flows/sec)", 0.5, 10.0, 3.0, 0.5,
-                              help="Synthetic traffic generation speed")
+        st.markdown("**Simulate speed**")
+        flow_rate = st.slider("Fake connections per second", 0.5, 10.0, 3.0, 0.5)
 
     st.markdown("---")
+    st.markdown("**3. Run**")
     col_start, col_stop = st.columns(2)
     with col_start:
         start_btn = st.button("▶ Start", use_container_width=True, key="start_btn")
@@ -418,15 +427,15 @@ status_label  = "● LIVE" if st.session_state.service_running else "● STOPPED
 demo_note     = "" if model_exists else "<span style='color:#f59e0b;font-size:0.7rem'> · DEMO MODE</span>"
 
 st.markdown(f"""
-<div style='display:flex;align-items:center;justify-content:space-between;padding:10px 0 24px'>
+<div style='display:flex;align-items:center;justify-content:space-between;padding:10px 0 16px'>
   <div>
     <h1 style='margin:0;font-size:1.8rem;font-weight:700;
                background:linear-gradient(135deg,#3b82f6,#06b6d4);
                -webkit-background-clip:text;-webkit-text-fill-color:transparent'>
       IaaS Security Monitor
     </h1>
-    <div style='font-size:0.75rem;color:#64748b;margin-top:4px'>
-      ML-Based Intrusion Detection System · NSL-KDD / Random Forest
+    <div style='font-size:0.85rem;color:#94a3b8;margin-top:6px'>
+      Watches network connections and warns you when traffic looks like an attack.
     </div>
   </div>
   <div style='text-align:right'>
@@ -435,6 +444,45 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+with st.expander("New here? Read this first (plain English)", expanded=not st.session_state.service_running):
+    st.markdown("""
+**What this app does**
+
+It looks at each network connection (**flow**) and guesses:
+- **Normal** — everyday traffic (browsing, email, etc.)
+- **DoS** — flood trying to knock a server offline
+- **Probe** — scanning / looking for open doors
+- **R2L** — remote break-in attempt (login abuse, etc.)
+- **U2R** — trying to become admin / root on the machine
+
+An **alert** means: “not Normal” **and** the model is confident enough (see **Alert threshold** in the sidebar).
+
+**How to use it (3 steps)**
+1. Left sidebar → leave **Simulate** on (fake traffic for learning) **or** pick **Live server**.
+2. Click **▶ Start**.
+3. Watch the numbers and the red rows — those are the warnings.
+
+**What the numbers mean**
+| You see | Meaning |
+|---|---|
+| Total Flows | How many connections were checked |
+| Alerts Raised | How many looked dangerous |
+| Alert Rate | Alerts ÷ flows (higher = noisier) |
+| Normal Flows | Connections judged safe |
+| Top Threat Class | Most common attack type so far |
+
+**Feed vs charts**
+- **Live feed** = latest connections, one by one (red = alert).
+- **Trend chart** = how attack types change over time.
+- **Pie chart** = mix of Normal vs attack types.
+- **Feature bar** = which traffic clues the model trusts most (e.g. byte counts).
+- **Recent Alerts** = table of only the dangerous ones.
+- **Bottom metrics** = how good the model was on a standard test dataset (not live traffic).
+
+Tip: if nothing moves, click **▶ Start** in the sidebar.
+""")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,12 +507,13 @@ def kpi(col, value, label, color="#3b82f6"):
       <div class="metric-label">{label}</div>
     </div>""", unsafe_allow_html=True)
 
-kpi(k1, f"{total_flows:,}",  "Total Flows")
-kpi(k2, f"{total_alerts:,}", "Alerts Raised",   "#ef4444")
-kpi(k3, alert_rate,          "Alert Rate",       "#f59e0b")
-kpi(k4, class_counts.get("Normal", 0), "Normal Flows",  "#10b981")
-kpi(k5, top_threat,          "Top Threat Class", "#a855f7")
+kpi(k1, f"{total_flows:,}",  "Connections checked")
+kpi(k2, f"{total_alerts:,}", "Warnings (alerts)",   "#ef4444")
+kpi(k3, alert_rate,          "% that look dangerous", "#f59e0b")
+kpi(k4, class_counts.get("Normal", 0), "Safe (Normal)",  "#10b981")
+kpi(k5, top_threat,          "Most common attack", "#a855f7")
 
+st.caption("These five boxes summarize what the AI saw since you pressed Start.")
 st.markdown("<br>", unsafe_allow_html=True)
 
 
@@ -474,12 +523,13 @@ st.markdown("<br>", unsafe_allow_html=True)
 col_feed, col_trend = st.columns([1, 1.6])
 
 with col_feed:
-    st.markdown('<div class="section-title">Live Classification Feed</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Live feed — each connection</div>', unsafe_allow_html=True)
+    st.caption("Green-ish rows = safe. Red rows = alert. Number after the label = confidence (0–1).")
     feed_container = st.container(height=320)
     with feed_container:
         recent = list(st.session_state.events)[-30:][::-1]
         if not recent:
-            st.caption("Waiting for flows…  Start the pipeline to see live data.")
+            st.caption("Nothing yet. Click ▶ Start in the left sidebar.")
         for evt in recent:
             ts   = evt["timestamp"][:19] if isinstance(evt["timestamp"], str) else str(evt["timestamp"])[:19]
             pred = evt["predicted"]
@@ -489,13 +539,14 @@ with col_feed:
             st.markdown(f"""
             <div class="{row_cls}">
               <span style='color:{color};font-weight:600'>{pred}</span>
-              <span style='color:#94a3b8'> · {prob:.2f} · </span>
+              <span style='color:#94a3b8'> · confidence {prob:.0%} · </span>
               <span style='color:#64748b'>{ts}</span><br>
               <span style='color:#475569'>{evt.get('src_ip','?')} → {evt.get('dst_ip','?')}</span>
             </div>""", unsafe_allow_html=True)
 
 with col_trend:
-    st.markdown('<div class="section-title">Alert Trend (last 60 s)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Trend — attacks over time</div>', unsafe_allow_html=True)
+    st.caption("Stacked area: how many connections of each type appeared recently.")
     if not df_events.empty:
         # Bin by 5-second windows
         df_plot = df_events.copy()
@@ -530,7 +581,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 col_dist, col_feat = st.columns(2)
 
 with col_dist:
-    st.markdown('<div class="section-title">Traffic Class Distribution</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Mix of traffic types</div>', unsafe_allow_html=True)
+    st.caption("Pie chart: share of Normal vs each attack class.")
     if class_counts:
         fig_pie = go.Figure(go.Pie(
             labels=list(class_counts.keys()),
@@ -555,7 +607,8 @@ with col_dist:
         st.caption("No data yet.")
 
 with col_feat:
-    st.markdown('<div class="section-title">Top Feature Importances (last alert)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Why the model decides (top clues)</div>', unsafe_allow_html=True)
+    st.caption("Longer bars = clues the AI trusts more (e.g. how many bytes were sent).")
     # Use last alert's feature importances if available, else load from model metrics
     feat_imp = None
     if alerts_list:
@@ -599,7 +652,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # ── ROW 4: Recent Alerts Table ────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="section-title">Recent Alerts</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Alert list — only the dangerous ones</div>', unsafe_allow_html=True)
+st.caption("Source IP → Dest IP is who talked to whom. Confidence closer to 100% = more sure.")
 if not df_alerts.empty:
     display_cols = ["timestamp","predicted","probability","src_ip","dst_ip","dst_port","protocol","service"]
     display_cols = [c for c in display_cols if c in df_alerts.columns]
@@ -625,7 +679,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # ── ROW 5: Suricata vs. ML Comparison ────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="section-title">Suricata (Signature) vs. ML Comparison</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title">Our AI vs old-style rules (Suricata) — demo comparison</div>', unsafe_allow_html=True)
+st.caption("Illustrative only: shows why ML can catch attacks that simple signature rules miss.")
 col_ml, col_sur, col_diff = st.columns(3)
 
 # Simulate Suricata-style detection (signature-based limitations)
@@ -709,15 +764,16 @@ st.plotly_chart(fig_cmp, use_container_width=True)
 m = load_metrics_cache()
 if m:
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Model Performance Metrics (NSL-KDD Test Set)</div>',
+    st.markdown('<div class="section-title">How good was the model in training? (lab test scores)</div>',
                 unsafe_allow_html=True)
+    st.caption("These scores are from the NSL-KDD test dataset — not from your live traffic right now.")
     col_acc, col_f1, col_cv, col_par = st.columns(4)
 
-    kpi(col_acc, f"{m.get('accuracy',0)*100:.1f}%",  "Test Accuracy",     "#10b981")
-    kpi(col_f1,  f"{m.get('f1_macro',0)*100:.1f}%",  "F1 Macro",          "#3b82f6")
-    kpi(col_cv,  f"{m.get('best_cv_f1',0)*100:.1f}%","Best CV F1",         "#a855f7")
+    kpi(col_acc, f"{m.get('accuracy',0)*100:.1f}%",  "Overall correctness", "#10b981")
+    kpi(col_f1,  f"{m.get('f1_macro',0)*100:.1f}%",  "Balance across attack types", "#3b82f6")
+    kpi(col_cv,  f"{m.get('best_cv_f1',0)*100:.1f}%","Score during training", "#a855f7")
     kpi(col_par, str(m.get("best_params",{}).get("n_estimators","—")),
-                                                       "n_estimators",      "#f59e0b")
+                                                       "Trees in the forest", "#f59e0b")
 
     # Per-class metrics table
     cr = m.get("classification_report", {})
