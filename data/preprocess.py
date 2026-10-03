@@ -220,8 +220,10 @@ def load_and_preprocess(data_dir=DATA_DIR):
 
     # Some features might be non-numeric due to dirty data (e.g., 'Infinity' or 'NaN' in CICIDS2017)
     # We force convert to numeric and fill with 0
-    X_train = X_train.apply(pd.to_numeric, errors='coerce').fillna(0)
-    X_test = X_test.apply(pd.to_numeric, errors='coerce').fillna(0)
+    X_train = X_train.apply(pd.to_numeric, errors='coerce')
+    X_test = X_test.apply(pd.to_numeric, errors='coerce')
+    X_train = X_train.replace([np.inf, -np.inf], np.nan).fillna(0)
+    X_test = X_test.replace([np.inf, -np.inf], np.nan).fillna(0)
 
     feature_names = list(X_train.columns)
 
