@@ -30,7 +30,12 @@ from data.preprocess import (
     load_preprocessor,
     preprocess_single_flow,
 )
-from model.train import load_model, load_metrics, ARTIFACTS_DIR
+from model.train import (
+    load_model,
+    load_metrics,
+    validate_artifacts,
+    ARTIFACTS_DIR,
+)
 from inference.flow_extractor import LiveFlowExtractor
 
 logger = logging.getLogger(__name__)
@@ -213,6 +218,7 @@ class InferenceService:
 
         logger.info("[Inference] Loading trained model ...")
         self._model = load_model()
+        validate_artifacts(self._model, load_metrics(), self._feature_names)
         self._classes = list(self._model.classes_)
         mode = "simulate" if simulate else f"live({interface or 'default'})"
         logger.info(f"[Inference] Classes: {self._classes}")

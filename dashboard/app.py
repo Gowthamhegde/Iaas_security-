@@ -175,7 +175,8 @@ if "interface"      not in st.session_state: st.session_state.interface      = "
 # Helper: load model artifacts
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner="Loading ML model…")
-def get_inference_service(tau, rate, simulate, interface, flow_timeout):
+def get_inference_service(tau, rate, simulate, interface, flow_timeout, artifact_fingerprint):
+    del artifact_fingerprint
     from inference.service import InferenceService
     return InferenceService(
         simulate=simulate,
@@ -184,6 +185,15 @@ def get_inference_service(tau, rate, simulate, interface, flow_timeout):
         rate=rate,
         flow_timeout=flow_timeout,
     )
+
+
+def get_artifact_fingerprint(artifacts_path):
+    """Return a cache key that changes whenever a model artifact is replaced."""
+    names = ("random_forest.pkl", "preprocessor.joblib", "metrics.json")
+    files = [artifacts_path / name for name in names]
+    if not all(path.exists() for path in files):
+        return "incomplete"
+    return tuple((path.name, path.stat().st_size, path.stat().st_mtime_ns) for path in files)
 
 
 def load_metrics_cache():
@@ -315,8 +325,9 @@ if start_btn and not st.session_state.service_running:
         try:
             get_inference_service.clear()
             simulate = capture_mode == "Simulate"
+            artifact_fingerprint = get_artifact_fingerprint(artifacts_path)
             svc = get_inference_service(
-                tau, flow_rate, simulate, interface, flow_timeout
+                tau, flow_rate, simulate, interface, flow_timeout, artifact_fingerprint
             )
             svc.tau = tau
             svc.rate = flow_rate
@@ -330,6 +341,7 @@ if start_btn and not st.session_state.service_running:
             st.sidebar.success(f"Pipeline running ({mode_label}) ✓")
         except Exception as e:
             st.sidebar.error(f"Failed to start: {e}")
+            st.sidebar.exception(e)
 
 if stop_btn and st.session_state.service_running:
     if st.session_state.service:
@@ -514,6 +526,84 @@ kpi(k4, class_counts.get("Normal", 0), "Safe (Normal)",  "#10b981")
 kpi(k5, top_threat,          "Most common attack", "#a855f7")
 
 st.caption("These five boxes summarize what the AI saw since you pressed Start.")
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-time investigation panel
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">Real-time investigation</div>', unsafe_allow_html=True)
+st.caption("Use the latest flow and rolling one-minute counters to decide whether traffic needs attention.")
+
+now = pd.Timestamp.now()
+recent_window = df_events[df_events["timestamp"] >= now - pd.Timedelta(minutes=1)] if not df_events.empty else df_events
+latest_event = events_list[-1] if events_list else None
+window_flows = len(recent_window)
+window_alerts = int(recent_window["is_alert"].sum()) if not recent_window.empty else 0
+window_alert_rate = (window_alerts / window_flows) if window_flows else 0
+window_confidence = float(recent_window["probability"].mean()) if not recent_window.empty else 0
+
+rt1, rt2, rt3, rt4 = st.columns(4)
+kpi(rt1, f"{window_flows:,}", "Flows in last minute", "#06b6d4")
+kpi(rt2, f"{window_alerts:,}", "Alerts in last minute", "#ef4444")
+kpi(rt3, f"{window_alert_rate:.1%}", "Rolling alert rate", "#f59e0b")
+kpi(rt4, f"{window_confidence:.1%}", "Mean confidence", "#a855f7")
+
+if latest_event:
+    detail_col, prob_col = st.columns([1, 1])
+    with detail_col:
+        latest_label = latest_event.get("predicted", "Unknown")
+        latest_color = CLASS_COLORS.get(latest_label, "#64748b")
+        latest_status = "ALERT" if latest_event.get("is_alert") else "NORMAL"
+        st.markdown(
+            f"""
+            <div class="metric-card" style="border-color:{latest_color}80">
+              <div style="font-size:0.7rem;color:#94a3b8;letter-spacing:0.08em">LATEST DECISION</div>
+              <div style="font-size:1.8rem;font-weight:700;color:{latest_color}">{latest_label}</div>
+              <div style="color:#cbd5e1">Confidence: <b>{latest_event.get("probability", 0):.1%}</b>
+                · <b>{latest_status}</b></div>
+              <div style="font-size:0.78rem;color:#94a3b8;margin-top:8px">
+                {latest_event.get("src_ip", "?")}:{latest_event.get("src_port", 0)}
+                → {latest_event.get("dst_ip", "?")}:{latest_event.get("dst_port", 0)}
+                · {latest_event.get("protocol", "?")} · {latest_event.get("service", "?")}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with prob_col:
+        probabilities = latest_event.get("probabilities", {})
+        if probabilities:
+            probability_df = pd.DataFrame(
+                {"Class": list(probabilities), "Probability": list(probabilities.values())}
+            )
+            fig_prob = px.bar(
+                probability_df,
+                x="Probability",
+                y="Class",
+                orientation="h",
+                range_x=[0, 1],
+                color="Class",
+                color_discrete_map=CLASS_COLORS,
+                title="Latest model probabilities",
+                template="plotly_dark",
+            )
+            fig_prob.update_layout(
+                height=190,
+                margin=dict(l=0, r=0, t=35, b=0),
+                showlegend=False,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_prob, use_container_width=True)
+
+    raw_features = latest_event.get("raw_features", {})
+    if raw_features:
+        with st.expander("Inspect latest flow features", expanded=False):
+            feature_df = pd.DataFrame(
+                [{"Feature": key, "Value": value} for key, value in raw_features.items()]
+            )
+            st.dataframe(feature_df, use_container_width=True, hide_index=True, height=220)
+
 st.markdown("<br>", unsafe_allow_html=True)
 
 
@@ -795,12 +885,25 @@ if m:
     cm = m.get("confusion_matrix")
     classes = m.get("classes", [])
     if cm and classes:
+        total_test = sum(sum(row) for row in cm)
+        correct_test = sum(cm[i][i] for i in range(min(len(cm), len(classes))))
+        reported_accuracy = m.get("accuracy")
+        if reported_accuracy is not None:
+            st.caption(
+                f"Test accuracy: **{reported_accuracy:.2%}** "
+                f"({correct_test:,} correct out of {total_test:,} test samples)."
+            )
         fig_cm = px.imshow(
             cm, x=classes, y=classes,
             color_continuous_scale="Blues",
             text_auto=True,
             labels=dict(x="Predicted", y="Actual"),
-            title="Confusion Matrix",
+            title=(
+                f"Confusion Matrix — Test Accuracy: "
+                f"{reported_accuracy:.2%}"
+                if reported_accuracy is not None
+                else "Confusion Matrix"
+            ),
             template="plotly_dark",
         )
         fig_cm.update_layout(
